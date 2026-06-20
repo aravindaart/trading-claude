@@ -79,9 +79,11 @@ class RiskManager:
 
     def correlation_filter_allows(self, new_symbol: str, new_direction: str, open_positions: dict) -> bool:
         """
-        Block new BTC/USD long if SPY and QQQ are both already long.
+        Block any new crypto long if SPY and QQQ are both already long.
+        Prevents doubling up on risk-on exposure across equity and crypto.
         """
-        if new_symbol != "BTC/USD" or new_direction != "long":
+        crypto_symbols = {"BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"}
+        if new_symbol not in crypto_symbols or new_direction != "long":
             return True
 
         spy_long = open_positions.get("SPY", {}).get("direction") == "long"
@@ -89,7 +91,7 @@ class RiskManager:
 
         if spy_long and qqq_long:
             logger.info(
-                "Correlation filter: blocking BTC/USD long — SPY and QQQ are both long"
+                "Correlation filter: blocking %s long — SPY and QQQ are both long", new_symbol
             )
             return False
 

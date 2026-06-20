@@ -8,11 +8,14 @@ ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 
 INSTRUMENTS = {
-    "SPY": {"strategy": "mean_reversion", "asset_class": "us_equity"},
-    "QQQ": {"strategy": "mean_reversion", "asset_class": "us_equity"},
-    "BTC/USD": {"strategy": "momentum_breakout", "asset_class": "crypto"},
-    "GLD": {"strategy": "trend_following", "asset_class": "us_equity"},
-    "USO": {"strategy": "trend_following", "asset_class": "us_equity"},
+    "SPY":      {"strategy": "mean_reversion",    "asset_class": "us_equity"},
+    "QQQ":      {"strategy": "mean_reversion",    "asset_class": "us_equity"},
+    "BTC/USD":  {"strategy": "momentum_breakout", "asset_class": "crypto"},
+    "ETH/USD":  {"strategy": "momentum_breakout", "asset_class": "crypto"},
+    "SOL/USD":  {"strategy": "momentum_breakout", "asset_class": "crypto"},
+    "DOGE/USD": {"strategy": "momentum_breakout", "asset_class": "crypto"},
+    "GLD":      {"strategy": "trend_following",   "asset_class": "us_equity"},
+    "USO":      {"strategy": "trend_following",   "asset_class": "us_equity"},
 }
 
 MEAN_REVERSION = {
