@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import alpaca_trade_api as tradeapi
 
 from config import DAILY_PNL_CSV, INSTRUMENTS, LOG_DIR, TIMEZONE, TRADES_CSV
+from bot import telegram
 
 logger = logging.getLogger(__name__)
 TZ = ZoneInfo(TIMEZONE)
@@ -114,6 +115,14 @@ class Portfolio:
             "alpaca_order_id": order.id,
             "opened_at": datetime.now(TZ).isoformat(),
         }
+
+        emoji = "🟢" if direction == "long" else "🔴"
+        telegram.send_message(
+            f"{emoji} *TRADE OPEN* — {symbol}\n"
+            f"Direction: {direction.upper()}\n"
+            f"Qty: {qty} @ ${entry_price:.4f}\n"
+            f"Hard stop: ${hard_stop:.4f}"
+        )
         return True
 
     def close_position(self, symbol: str, exit_price: float, reason: str = "") -> bool:
@@ -155,6 +164,16 @@ class Portfolio:
             "position_size": pos["qty"],
         })
         logger.info("Closed %s direction=%s pnl=%.2f", symbol, pos["direction"], pnl)
+
+        emoji = "✅" if pnl >= 0 else "❌"
+        sign = "+" if pnl >= 0 else ""
+        telegram.send_message(
+            f"{emoji} *TRADE CLOSED* — {symbol}\n"
+            f"Direction: {pos['direction'].upper()}\n"
+            f"Entry: ${pos['entry_price']:.4f} → Exit: ${exit_price:.4f}\n"
+            f"P&L: *{sign}${pnl:.2f}*\n"
+            f"Reason: {reason}"
+        )
         del self.open_positions[symbol]
         return True
 
