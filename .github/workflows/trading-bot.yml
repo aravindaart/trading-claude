@@ -5,6 +5,9 @@ on:
     - cron: '0 */5 * * *'   # restart every 5 hours (under GitHub's 6h limit)
   workflow_dispatch:          # manual trigger from GitHub UI
 
+permissions:
+  contents: write             # needed to push logs branch
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -12,6 +15,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Restore cumulative logs from logs branch
+        run: |
+          git fetch origin logs:logs 2>/dev/null || true
+          if git show-ref --quiet refs/heads/logs; then
+            git checkout logs -- logs/ 2>/dev/null || true
+            git checkout main
+          fi
+          mkdir -p logs
 
       - uses: actions/setup-python@v5
         with:
@@ -30,10 +42,18 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python -m bot.main
 
-      - name: Upload trade logs
-        if: always()    # upload even if bot errors out
-        uses: actions/upload-artifact@v4
-        with:
-          name: trade-logs-${{ github.run_number }}
-          path: logs/
-          retention-days: 30
+      - name: Push cumulative logs to logs branch
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Switch to orphan logs branch or existing one
+          git fetch origin logs 2>/dev/null && git checkout logs || git checkout --orphan logs
+
+          # Only keep the logs directory
+          git rm -rf --cached . --quiet 2>/dev/null || true
+          git add logs/
+          git diff --cached --quiet || git commit -m "logs: update after run ${{ github.run_number }}"
+          git push origin logs
+          git checkout main
