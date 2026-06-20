@@ -275,6 +275,21 @@ def run():
     portfolio.sync_with_broker()
 
     equity_day_start_recorded = False
+    # Persist the last briefing date to a file so restarts don't re-send it
+    _BRIEFING_MARKER = "logs/.last_briefing_date"
+
+    def _already_briefed_today() -> bool:
+        try:
+            with open(_BRIEFING_MARKER) as f:
+                return f.read().strip() == datetime.now(TZ).date().isoformat()
+        except FileNotFoundError:
+            return False
+
+    def _mark_briefed_today():
+        os.makedirs("logs", exist_ok=True)
+        with open(_BRIEFING_MARKER, "w") as f:
+            f.write(datetime.now(TZ).date().isoformat())
+
     last_day: int | None = None
 
     EQUITY_SYMBOLS = [s for s, cfg in INSTRUMENTS.items() if cfg["asset_class"] == "us_equity"]
@@ -296,16 +311,18 @@ def run():
                 portfolio.record_day_start(equity)
                 equity_day_start_recorded = True
 
-                # Send morning briefing via Telegram
-                current_prices: dict[str, float] = {}
-                for sym in portfolio.open_positions:
-                    try:
-                        quote = api.get_latest_trade(sym.replace("/", ""))
-                        current_prices[sym] = float(quote.price)
-                    except Exception:
-                        pass
-                msg = briefing.compose(portfolio.open_positions, current_prices, equity)
-                telegram.send_message(msg)
+                # Send morning briefing once per calendar day only
+                if not _already_briefed_today():
+                    current_prices: dict[str, float] = {}
+                    for sym in portfolio.open_positions:
+                        try:
+                            quote = api.get_latest_trade(sym.replace("/", ""))
+                            current_prices[sym] = float(quote.price)
+                        except Exception:
+                            pass
+                    msg = briefing.compose(portfolio.open_positions, current_prices, equity)
+                    telegram.send_message(msg)
+                    _mark_briefed_today()
             except Exception as exc:
                 logger.error("Error recording day start: %s", exc)
             last_day = today
