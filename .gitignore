@@ -1,0 +1,17 @@
+# secrets
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# bot output
+logs/
+backtest_results.png
+
+# tooling
+.gstack/
+.claude/
