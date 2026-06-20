@@ -33,6 +33,7 @@ from config import (
 from bot.portfolio import Portfolio
 from bot.risk_manager import RiskManager
 from bot.strategies import mean_reversion, momentum_breakout, trend_following
+from bot import briefing, telegram
 
 import os
 os.makedirs("logs", exist_ok=True)
@@ -295,6 +296,16 @@ def run():
                 portfolio.record_day_start(equity)
                 equity_day_start_recorded = True
 
+                # Send morning briefing via Telegram
+                current_prices: dict[str, float] = {}
+                for sym in portfolio.open_positions:
+                    try:
+                        quote = api.get_latest_trade(sym.replace("/", ""))
+                        current_prices[sym] = float(quote.price)
+                    except Exception:
+                        pass
+                msg = briefing.compose(portfolio.open_positions, current_prices, equity)
+                telegram.send_message(msg)
             except Exception as exc:
                 logger.error("Error recording day start: %s", exc)
             last_day = today
