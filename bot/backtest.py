@@ -91,13 +91,21 @@ def _fetch_history(api: tradeapi.REST, symbol: str, timeframe: str) -> pd.DataFr
 
     logger.info("Fetching %s %s history (%s → %s)…", symbol, timeframe, start.date(), end.date())
 
-    def _get(tf, s, e):
+    def _get(tf, s, e) -> pd.DataFrame:
         if is_crypto:
-            return api.get_crypto_bars(symbol, tf, start=s.isoformat(), end=e.isoformat()).df
-        return api.get_bars(
-            symbol, tf, start=s.isoformat(), end=e.isoformat(),
-            adjustment="raw", feed="iex",
-        ).df
+            df = api.get_crypto_bars(symbol, tf, start=s.isoformat(), end=e.isoformat()).df
+        else:
+            df = api.get_bars(symbol, tf, start=s.isoformat(), end=e.isoformat(), adjustment="raw", feed="iex").df
+        if df.empty:
+            return df
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if "timestamp" in df.columns:
+                df = df.set_index("timestamp")
+            else:
+                return pd.DataFrame()
+        df.index = pd.to_datetime(df.index, utc=True)
+        df = df.drop(columns=["symbol"], errors="ignore")
+        return df
 
     if timeframe == "15Min":
         raw = _get(tradeapi.TimeFrame.Minute, start, end)

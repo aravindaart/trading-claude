@@ -85,18 +85,38 @@ def _fetch_bars(api: tradeapi.REST, symbol: str, timeframe: str, limit: int) -> 
     is_crypto = _is_crypto(symbol)
     end = datetime.now(TZ)
 
-    def _get(tf, start):
+    def _get(tf, start) -> pd.DataFrame:
         if is_crypto:
-            return api.get_crypto_bars(alpaca_symbol, tf, start=start.isoformat(), end=end.isoformat()).df
-        return api.get_bars(
-            alpaca_symbol, tf,
-            start=start.isoformat(), end=end.isoformat(),
-            adjustment="raw", feed="iex",
-        ).df
+            df = api.get_crypto_bars(alpaca_symbol, tf, start=start.isoformat(), end=end.isoformat()).df
+        else:
+            df = api.get_bars(
+                alpaca_symbol, tf,
+                start=start.isoformat(), end=end.isoformat(),
+                adjustment="raw", feed="iex",
+            ).df
+
+        if df.empty:
+            return df
+
+        # Alpaca returns a RangeIndex when no data or a symbol column exists.
+        # Ensure we always have a DatetimeIndex so resample works correctly.
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if "timestamp" in df.columns:
+                df = df.set_index("timestamp")
+            else:
+                logger.warning("%s: bars have no timestamp index — skipping", symbol)
+                return pd.DataFrame()
+
+        df.index = pd.to_datetime(df.index, utc=True)
+        # Drop the symbol column if present (crypto bars include it)
+        df = df.drop(columns=["symbol"], errors="ignore")
+        return df
 
     if timeframe == "15Min":
         start = end - timedelta(minutes=15 * limit * 2)
         bars = _get(tradeapi.TimeFrame.Minute, start)
+        if bars.empty:
+            return bars
         bars = bars.resample("15min").agg(
             {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
         ).dropna()
@@ -106,6 +126,8 @@ def _fetch_bars(api: tradeapi.REST, symbol: str, timeframe: str, limit: int) -> 
     elif timeframe == "4Hour":
         start = end - timedelta(hours=4 * limit * 2)
         bars = _get(tradeapi.TimeFrame.Hour, start)
+        if bars.empty:
+            return bars
         bars = bars.resample("4h").agg(
             {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
         ).dropna()
