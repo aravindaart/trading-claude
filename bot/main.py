@@ -275,7 +275,7 @@ def run():
     portfolio.sync_with_broker()
 
     equity_day_start_recorded = False
-    # Persist the last briefing date to a file so restarts don't re-send it
+    last_day: int | None = None
     _BRIEFING_MARKER = "logs/.last_briefing_date"
 
     def _already_briefed_today() -> bool:
@@ -290,14 +290,14 @@ def run():
         with open(_BRIEFING_MARKER, "w") as f:
             f.write(datetime.now(TZ).date().isoformat())
 
-    last_day: int | None = None
-
     EQUITY_SYMBOLS = [s for s, cfg in INSTRUMENTS.items() if cfg["asset_class"] == "us_equity"]
     CRYPTO_SYMBOLS = [s for s, cfg in INSTRUMENTS.items() if cfg["asset_class"] == "crypto"]
 
     while True:
         now = datetime.now(TZ)
         today = now.date().day
+
+        today_date = now.date().isoformat()
 
         # Daily P&L bookkeeping
         if today != last_day:
@@ -312,7 +312,7 @@ def run():
                 equity_day_start_recorded = True
 
                 # Send morning briefing once per calendar day only
-                if not _already_briefed_today():
+                if not _already_briefed_today() and now.hour >= 7:
                     current_prices: dict[str, float] = {}
                     for sym in portfolio.open_positions:
                         try:

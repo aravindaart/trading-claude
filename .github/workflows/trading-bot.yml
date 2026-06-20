@@ -51,9 +51,9 @@ jobs:
           # Switch to orphan logs branch or existing one
           git fetch origin logs 2>/dev/null && git checkout logs || git checkout --orphan logs
 
-          # Only keep the logs directory
+          # Keep logs directory including hidden marker files
           git rm -rf --cached . --quiet 2>/dev/null || true
-          git add logs/
+          git add logs/ logs/.last_briefing_date 2>/dev/null || git add logs/
           git diff --cached --quiet || git commit -m "logs: update after run ${{ github.run_number }}"
           git push origin logs
           git checkout main
