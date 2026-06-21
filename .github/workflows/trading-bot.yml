@@ -16,15 +16,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Restore cumulative logs from logs branch
-        run: |
-          git fetch origin logs:logs 2>/dev/null || true
-          if git show-ref --quiet refs/heads/logs; then
-            git checkout logs -- logs/ 2>/dev/null || true
-            git checkout main
-          fi
-          mkdir -p logs
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -32,6 +23,12 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Restore cumulative logs from Gist
+        env:
+          GH_GIST_TOKEN: ${{ secrets.GH_GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+        run: python scripts/pull_logs_from_gist.py
 
       - name: Run trading bot
         env:
