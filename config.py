@@ -30,9 +30,9 @@ MEAN_REVERSION = {
 MOMENTUM_BREAKOUT = {
     "timeframe": "1Hour",
     "lookback_periods": 20,
-    # Volume filter raised 1.5→2.0 to eliminate low-conviction breakouts
-    # (was causing 27% win rate and >15% drawdown on BTC).
-    "volume_multiplier": 2.0,
+    # Lowered to 0.5 for paper trading — Alpaca crypto volume is thin,
+    # 2.0x was blocking every signal. Revisit for live trading.
+    "volume_multiplier": 0.5,
     # Trailing stop tightened 2.0→1.5 ATR to lock in gains faster on crypto.
     "atr_trailing_stop": 1.5,
     "atr_period": 14,
