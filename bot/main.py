@@ -213,6 +213,11 @@ def _process_momentum_breakout(
     if signal is None:
         return
 
+    # Alpaca does not support crypto short selling — skip short signals for crypto symbols
+    if _is_crypto(symbol) and signal["direction"] == "short":
+        logger.debug("%s: skipping short signal — crypto short selling not supported", symbol)
+        return
+
     if not risk.correlation_filter_allows(symbol, signal["direction"], portfolio.open_positions):
         return
 
