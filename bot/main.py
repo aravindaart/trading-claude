@@ -158,7 +158,7 @@ def _is_equity_market_open(api: tradeapi.REST) -> bool:
 
 def _process_mean_reversion(
     symbol: str, api: tradeapi.REST, portfolio: Portfolio, risk: RiskManager,
-    entry_blocked_until: dict,
+    entry_blocked_until: dict, equity: float,
 ):
     cfg = MEAN_REVERSION
     bars = _fetch_bars(api, symbol, cfg["timeframe"], BARS_NEEDED["mean_reversion"])
@@ -171,7 +171,8 @@ def _process_mean_reversion(
         portfolio.update_trailing_stop(symbol, current_price)
         hit, reason = portfolio.is_any_stop_hit(symbol, current_price)
         if hit:
-            portfolio.close_position(symbol, current_price, reason=reason)
+            if portfolio.close_position(symbol, current_price, reason=reason):
+                portfolio.save_state()
             return
 
         # Force-exit after max holding period to avoid riding a trend indefinitely
@@ -179,15 +180,17 @@ def _process_mean_reversion(
         opened_at = datetime.fromisoformat(pos["opened_at"])
         bars_held = (datetime.now(TZ) - opened_at).total_seconds() / (15 * 60)
         if bars_held >= _MEAN_REVERSION_MAX_HOLD_BARS:
-            portfolio.close_position(
+            if portfolio.close_position(
                 symbol, current_price,
                 reason=f"max hold period ({_MEAN_REVERSION_MAX_HOLD_BARS} bars) reached",
-            )
+            ):
+                portfolio.save_state()
             return
 
         direction = portfolio.position_direction(symbol)
         if mean_reversion.check_exit(symbol, bars, direction):
-            portfolio.close_position(symbol, current_price, reason="reverted to mean")
+            if portfolio.close_position(symbol, current_price, reason="reverted to mean"):
+                portfolio.save_state()
         return
 
     # Cooldown check — skip entry if a recent order failed
@@ -201,8 +204,8 @@ def _process_mean_reversion(
     if signal is None:
         return
 
-    # ATR for position sizing — use std * sqrt(bars/day) as a proxy; or compute directly
-    atr = float(bars["close"].std())  # simple proxy; real ATR requires high/low
+    # ATR for position sizing
+    atr = float(bars["close"].std())
     if "high" in bars.columns and "low" in bars.columns:
         from bot.strategies.trend_following import _atr as compute_atr
         atr = compute_atr(bars, RISK["atr_period"])
@@ -210,13 +213,14 @@ def _process_mean_reversion(
     if not risk.correlation_filter_allows(symbol, signal["direction"], portfolio.open_positions):
         return
 
-    qty = risk.calc_position_size(atr, current_price)
+    qty = risk.calc_position_size(atr, current_price, equity=equity)
     if qty <= 0:
         return
 
-    hard_stop = risk.calc_hard_stop(signal["direction"], current_price, qty)
+    hard_stop = risk.calc_hard_stop(signal["direction"], current_price, qty, equity=equity)
     opened = portfolio.open_position(symbol, signal["direction"], qty, current_price, hard_stop)
     if opened:
+        portfolio.save_state()
         logger.info("SIGNAL %s %s: %s", symbol, signal["direction"].upper(), signal["reason"])
     else:
         entry_blocked_until[symbol] = now + timedelta(minutes=_COOLDOWN_MINUTES["mean_reversion"])
@@ -225,7 +229,7 @@ def _process_mean_reversion(
 
 def _process_momentum_breakout(
     symbol: str, api: tradeapi.REST, portfolio: Portfolio, risk: RiskManager,
-    entry_blocked_until: dict, pending_signals: dict,
+    entry_blocked_until: dict, pending_signals: dict, equity: float,
 ):
     cfg = MOMENTUM_BREAKOUT
     bars = _fetch_bars(api, symbol, cfg["timeframe"], BARS_NEEDED["momentum_breakout"])
@@ -239,7 +243,8 @@ def _process_momentum_breakout(
         portfolio.update_trailing_stop(symbol, current_price)
         hit, reason = portfolio.is_any_stop_hit(symbol, current_price)
         if hit:
-            portfolio.close_position(symbol, current_price, reason=reason)
+            if portfolio.close_position(symbol, current_price, reason=reason):
+                portfolio.save_state()
         return
 
     signal = momentum_breakout.generate_signal(symbol, bars)
@@ -271,17 +276,18 @@ def _process_momentum_breakout(
         return
 
     atr = signal.get("atr", current_price * 0.01)
-    qty = risk.calc_position_size(atr, current_price)
+    qty = risk.calc_position_size(atr, current_price, equity=equity)
     if qty <= 0:
         return
 
-    hard_stop = risk.calc_hard_stop(signal["direction"], current_price, qty)
+    hard_stop = risk.calc_hard_stop(signal["direction"], current_price, qty, equity=equity)
     opened = portfolio.open_position(
         symbol, signal["direction"], qty, current_price,
         hard_stop, trailing_stop_distance=signal["trailing_stop"],
     )
     if opened:
         pending_signals.pop(symbol, None)
+        portfolio.save_state()
         logger.info("SIGNAL %s %s: %s", symbol, signal["direction"].upper(), signal["reason"])
     else:
         entry_blocked_until[symbol] = now + timedelta(minutes=_COOLDOWN_MINUTES["momentum_breakout"])
@@ -290,7 +296,7 @@ def _process_momentum_breakout(
 
 def _process_trend_following(
     symbol: str, api: tradeapi.REST, portfolio: Portfolio, risk: RiskManager,
-    pending_signals: dict,
+    pending_signals: dict, equity: float,
 ):
     cfg = TREND_FOLLOWING
     bars = _fetch_bars(api, symbol, cfg["timeframe"], BARS_NEEDED["trend_following"])
@@ -303,7 +309,8 @@ def _process_trend_following(
         portfolio.update_trailing_stop(symbol, current_price)
         hit, reason = portfolio.is_any_stop_hit(symbol, current_price)
         if hit:
-            portfolio.close_position(symbol, current_price, reason=reason)
+            if portfolio.close_position(symbol, current_price, reason=reason):
+                portfolio.save_state()
             pending_signals.pop(symbol, None)
             return
 
@@ -317,6 +324,7 @@ def _process_trend_following(
                     reason=f"cross signal reversal: {signal['reason']}",
                 )
                 if closed:
+                    portfolio.save_state()
                     # Stage the new direction for 1-bar confirmation on next poll
                     pending_signals[symbol] = signal
         return
@@ -337,17 +345,18 @@ def _process_trend_following(
         return
 
     atr = signal.get("atr", current_price * 0.01)
-    qty = risk.calc_position_size(atr, current_price)
+    qty = risk.calc_position_size(atr, current_price, equity=equity)
     if qty <= 0:
         return
 
-    hard_stop = risk.calc_hard_stop(signal["direction"], current_price, qty)
+    hard_stop = risk.calc_hard_stop(signal["direction"], current_price, qty, equity=equity)
     opened = portfolio.open_position(
         symbol, signal["direction"], qty, current_price,
         hard_stop, trailing_stop_distance=signal["trailing_stop"],
     )
     if opened:
         pending_signals.pop(symbol, None)
+        portfolio.save_state()
         logger.info("SIGNAL %s %s: %s", symbol, signal["direction"].upper(), signal["reason"])
 
 
@@ -361,7 +370,8 @@ def run():
     portfolio = Portfolio(api)
     risk = RiskManager(api)
 
-    # Reconcile with broker on start
+    # Rehydrate position metadata from the last run, then reconcile with broker
+    portfolio.load_state()
     portfolio.sync_with_broker()
 
     equity_day_start_recorded = False
@@ -394,16 +404,23 @@ def run():
 
         today_date = now.date().isoformat()
 
+        # Cache equity once per loop — passed to sizing/stop functions to avoid repeat API calls
+        try:
+            cached_equity = risk.get_equity()
+        except Exception as exc:
+            logger.warning("Could not fetch equity this loop: %s — skipping iteration", exc)
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
+
         # Daily P&L bookkeeping
         if today != last_day:
             if last_day is not None:
                 try:
-                    portfolio.record_day_end(risk.get_equity())
+                    portfolio.record_day_end(cached_equity)
                 except Exception as exc:
                     logger.error("Error recording day end: %s", exc)
             try:
-                equity = risk.get_equity()
-                portfolio.record_day_start(equity)
+                portfolio.record_day_start(cached_equity)
                 equity_day_start_recorded = True
 
                 # Send morning briefing once per calendar day only
@@ -415,7 +432,7 @@ def run():
                             current_prices[sym] = float(quote.price)
                         except Exception:
                             pass
-                    msg = briefing.compose(portfolio.open_positions, current_prices, equity)
+                    msg = briefing.compose(portfolio.open_positions, current_prices, cached_equity)
                     telegram.send_message(msg)
                     _mark_briefed_today()
             except Exception as exc:
@@ -434,15 +451,18 @@ def run():
 
             try:
                 if strategy == "mean_reversion":
-                    _process_mean_reversion(symbol, api, portfolio, risk, _entry_blocked_until)
+                    _process_mean_reversion(symbol, api, portfolio, risk, _entry_blocked_until, cached_equity)
                 elif strategy == "momentum_breakout":
-                    _process_momentum_breakout(symbol, api, portfolio, risk, _entry_blocked_until, _pending_signals)
+                    _process_momentum_breakout(symbol, api, portfolio, risk, _entry_blocked_until, _pending_signals, cached_equity)
                 elif strategy == "trend_following":
-                    _process_trend_following(symbol, api, portfolio, risk, _pending_signals)
+                    _process_trend_following(symbol, api, portfolio, risk, _pending_signals, cached_equity)
             except tradeapi.rest.APIError as exc:
                 logger.error("Alpaca API error for %s: %s", symbol, exc)
             except Exception as exc:
                 logger.exception("Unexpected error processing %s: %s", symbol, exc)
+
+        # Persist trailing-stop movements and any other mid-loop state changes
+        portfolio.save_state()
 
         logger.debug("Sleeping %ds", POLL_INTERVAL_SECONDS)
         time.sleep(POLL_INTERVAL_SECONDS)

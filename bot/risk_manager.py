@@ -28,18 +28,20 @@ class RiskManager:
     # Position sizing
     # ------------------------------------------------------------------
 
-    def calc_position_size(self, atr: float, price: float) -> int:
+    def calc_position_size(self, atr: float, price: float, equity: float | None = None) -> int:
         """
         Size so that a 1-ATR adverse move = risk_per_trade_pct * equity.
 
         shares = (equity * risk_pct) / atr
         Then cap so that a hard_stop_pct * equity loss also limits exposure.
+        Pass equity to avoid an extra API call when it was already fetched this loop.
         """
         if atr <= 0 or price <= 0:
             logger.warning("Invalid atr=%.6f or price=%.6f, returning 0 shares", atr, price)
             return 0
 
-        equity = self.get_equity()
+        if equity is None:
+            equity = self.get_equity()
         risk_dollars = equity * RISK["risk_per_trade_pct"]
 
         atr_based_shares = risk_dollars / atr
@@ -60,9 +62,10 @@ class RiskManager:
     # Hard stop price
     # ------------------------------------------------------------------
 
-    def calc_hard_stop(self, direction: str, entry_price: float, qty: int) -> float:
+    def calc_hard_stop(self, direction: str, entry_price: float, qty: int, equity: float | None = None) -> float:
         """Return the hard stop price that limits total loss to hard_stop_pct of equity."""
-        equity = self.get_equity()
+        if equity is None:
+            equity = self.get_equity()
         # Dollar loss budget divided by share count gives the per-share stop distance
         stop_distance = (equity * RISK["hard_stop_pct"]) / max(qty, 1)
         if direction == "long":
@@ -75,10 +78,11 @@ class RiskManager:
 
     MAX_CONCURRENT_POSITIONS = 4
 
-    def correlation_filter_allows(self, new_symbol: str, new_direction: str, open_positions: dict) -> bool:
+    def correlation_filter_allows(self, new_symbol: str, new_direction: str, open_positions: dict, equity: float | None = None) -> bool:
         """
         Block new entries when the portfolio is already at max concurrent positions,
         or when adding a new crypto long while SPY and QQQ are both long.
+        equity param is unused here but accepted for call-site uniformity.
         """
         if len(open_positions) >= self.MAX_CONCURRENT_POSITIONS:
             logger.info(

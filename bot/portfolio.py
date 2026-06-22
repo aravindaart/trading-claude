@@ -5,6 +5,7 @@ Tracks open positions, submits orders via the Alpaca API,
 and writes trade records to trades.csv and daily_pnl.csv.
 """
 import csv
+import json
 import logging
 import os
 import time
@@ -273,6 +274,26 @@ class Portfolio:
 
     def position_direction(self, symbol: str) -> str | None:
         return self.open_positions.get(symbol, {}).get("direction")
+
+    def save_state(self, path: str = "logs/positions.json"):
+        """Write open_positions to JSON so the next run can rehydrate."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(self.open_positions, f, indent=2)
+
+    def load_state(self, path: str = "logs/positions.json"):
+        """Populate open_positions from JSON. Call before sync_with_broker() so broker reconciliation can prune stale entries."""
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path) as f:
+                saved = json.load(f)
+            for symbol, pos in saved.items():
+                if symbol not in self.open_positions:
+                    self.open_positions[symbol] = pos
+            logger.info("State restored from %s: %s", path, list(saved.keys()))
+        except Exception as exc:
+            logger.warning("Could not load state from %s: %s", path, exc)
 
     def sync_with_broker(self):
         """Reconcile local state against Alpaca positions (called on startup)."""
