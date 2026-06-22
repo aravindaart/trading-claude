@@ -119,12 +119,17 @@ class Portfolio:
         }
 
         emoji = "🟢" if direction == "long" else "🔴"
+        msg = (
+            f"{emoji} TRADE OPEN — {symbol} {direction.upper()} "
+            f"{qty} @ ${entry_price:.4f} | stop ${hard_stop:.4f}"
+        )
         telegram.send_message(
             f"{emoji} *TRADE OPEN* — {symbol}\n"
             f"Direction: {direction.upper()}\n"
             f"Qty: {qty} @ ${entry_price:.4f}\n"
             f"Hard stop: ${hard_stop:.4f}"
         )
+        database.insert_event("TRADE", msg)
         return True
 
     def close_position(self, symbol: str, exit_price: float, reason: str = "") -> bool:
@@ -188,6 +193,10 @@ class Portfolio:
 
         emoji = "✅" if pnl >= 0 else "❌"
         sign = "+" if pnl >= 0 else ""
+        close_msg = (
+            f"{emoji} TRADE CLOSED — {symbol} {pos['direction'].upper()} "
+            f"${pos['entry_price']:.4f}→${fill_price:.4f} P&L {sign}${pnl:.2f} ({reason})"
+        )
         telegram.send_message(
             f"{emoji} *TRADE CLOSED* — {symbol}\n"
             f"Direction: {pos['direction'].upper()}\n"
@@ -195,6 +204,7 @@ class Portfolio:
             f"P&L: *{sign}${pnl:.2f}*\n"
             f"Reason: {reason}"
         )
+        database.insert_event("TRADE", close_msg)
         del self.open_positions[symbol]
         return True
 
