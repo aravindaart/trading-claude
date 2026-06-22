@@ -55,6 +55,8 @@ RISK = {
     "risk_per_trade_pct": 0.01,   # 1% of equity per ATR move
     # Halved from 1% — cuts mean-reversion losers faster before they compound.
     "hard_stop_pct": 0.005,
+    # Circuit breaker: halt new entries for the rest of the day once daily loss hits 3%.
+    "max_daily_loss_pct": 0.03,
 }
 
 LOG_DIR = "logs"

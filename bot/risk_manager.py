@@ -28,7 +28,7 @@ class RiskManager:
     # Position sizing
     # ------------------------------------------------------------------
 
-    def calc_position_size(self, atr: float, price: float, equity: float | None = None) -> int:
+    def calc_position_size(self, atr: float, price: float, equity: float | None = None, fractional: bool = False) -> int | float:
         """
         Size so that a 1-ATR adverse move = risk_per_trade_pct * equity.
 
@@ -51,9 +51,12 @@ class RiskManager:
         hard_stop_shares = hard_stop_dollars / price
 
         shares = min(atr_based_shares, hard_stop_shares)
-        qty = max(1, int(shares))
+        if fractional:
+            qty: int | float = max(0.001, round(shares, 4))
+        else:
+            qty = max(1, int(shares))
         logger.info(
-            "Position size: equity=%.2f risk=$%.2f atr=%.4f → %d shares (price=%.2f)",
+            "Position size: equity=%.2f risk=$%.2f atr=%.4f → %g shares (price=%.2f)",
             equity, risk_dollars, atr, qty, price,
         )
         return qty

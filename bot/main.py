@@ -12,7 +12,7 @@ Responsibilities:
 import logging
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import alpaca_trade_api as tradeapi
@@ -158,7 +158,7 @@ def _is_equity_market_open(api: tradeapi.REST) -> bool:
 
 def _process_mean_reversion(
     symbol: str, api: tradeapi.REST, portfolio: Portfolio, risk: RiskManager,
-    entry_blocked_until: dict, equity: float,
+    entry_blocked_until: dict, equity: float, close_only: bool = False,
 ):
     cfg = MEAN_REVERSION
     bars = _fetch_bars(api, symbol, cfg["timeframe"], BARS_NEEDED["mean_reversion"])
@@ -193,6 +193,9 @@ def _process_mean_reversion(
                 portfolio.save_state()
         return
 
+    if close_only:
+        return
+
     # Cooldown check — skip entry if a recent order failed
     now = datetime.now(TZ)
     blocked_until = entry_blocked_until.get(symbol)
@@ -213,7 +216,7 @@ def _process_mean_reversion(
     if not risk.correlation_filter_allows(symbol, signal["direction"], portfolio.open_positions):
         return
 
-    qty = risk.calc_position_size(atr, current_price, equity=equity)
+    qty = risk.calc_position_size(atr, current_price, equity=equity, fractional=_is_crypto(symbol))
     if qty <= 0:
         return
 
@@ -229,7 +232,7 @@ def _process_mean_reversion(
 
 def _process_momentum_breakout(
     symbol: str, api: tradeapi.REST, portfolio: Portfolio, risk: RiskManager,
-    entry_blocked_until: dict, pending_signals: dict, equity: float,
+    entry_blocked_until: dict, pending_signals: dict, equity: float, close_only: bool = False,
 ):
     cfg = MOMENTUM_BREAKOUT
     bars = _fetch_bars(api, symbol, cfg["timeframe"], BARS_NEEDED["momentum_breakout"])
@@ -272,11 +275,14 @@ def _process_momentum_breakout(
         logger.debug("%s: entry cooldown active until %s", symbol, blocked_until.isoformat())
         return
 
+    if close_only:
+        return
+
     if not risk.correlation_filter_allows(symbol, signal["direction"], portfolio.open_positions):
         return
 
     atr = signal.get("atr", current_price * 0.01)
-    qty = risk.calc_position_size(atr, current_price, equity=equity)
+    qty = risk.calc_position_size(atr, current_price, equity=equity, fractional=_is_crypto(symbol))
     if qty <= 0:
         return
 
@@ -296,7 +302,7 @@ def _process_momentum_breakout(
 
 def _process_trend_following(
     symbol: str, api: tradeapi.REST, portfolio: Portfolio, risk: RiskManager,
-    pending_signals: dict, equity: float,
+    pending_signals: dict, equity: float, close_only: bool = False,
 ):
     cfg = TREND_FOLLOWING
     bars = _fetch_bars(api, symbol, cfg["timeframe"], BARS_NEEDED["trend_following"])
@@ -341,11 +347,14 @@ def _process_trend_following(
         logger.debug("%s: new %s signal — waiting for 1-bar confirmation", symbol, signal["direction"])
         return
 
+    if close_only:
+        return
+
     if not risk.correlation_filter_allows(symbol, signal["direction"], portfolio.open_positions):
         return
 
     atr = signal.get("atr", current_price * 0.01)
-    qty = risk.calc_position_size(atr, current_price, equity=equity)
+    qty = risk.calc_position_size(atr, current_price, equity=equity, fractional=_is_crypto(symbol))
     if qty <= 0:
         return
 
@@ -375,7 +384,7 @@ def run():
     portfolio.sync_with_broker()
 
     equity_day_start_recorded = False
-    last_day: int | None = None
+    last_day: date | None = None
     _BRIEFING_MARKER = "logs/.last_briefing_date"
 
     # Cooldown tracking: symbol → datetime after which re-entry is allowed
@@ -400,9 +409,7 @@ def run():
 
     while True:
         now = datetime.now(TZ)
-        today = now.date().day
-
-        today_date = now.date().isoformat()
+        today = now.date()
 
         # Cache equity once per loop — passed to sizing/stop functions to avoid repeat API calls
         try:
@@ -438,6 +445,20 @@ def run():
             except Exception as exc:
                 logger.error("Error recording day start: %s", exc)
             last_day = today
+            _entry_blocked_until.clear()
+            logger.info("New trading day — entry cooldowns cleared")
+
+        # Daily max-loss circuit breaker: go close-only for the rest of the day once
+        # cumulative loss exceeds max_daily_loss_pct of day-start equity.
+        _close_only = False
+        if portfolio._day_start_equity is not None:
+            day_loss_pct = (cached_equity - portfolio._day_start_equity) / portfolio._day_start_equity
+            if day_loss_pct <= -RISK.get("max_daily_loss_pct", 0.03):
+                _close_only = True
+                logger.warning(
+                    "Daily max-loss triggered (%.2f%% loss) — close-only mode active for remainder of day",
+                    day_loss_pct * 100,
+                )
 
         equity_market_open = _is_equity_market_open(api)
 
@@ -451,11 +472,11 @@ def run():
 
             try:
                 if strategy == "mean_reversion":
-                    _process_mean_reversion(symbol, api, portfolio, risk, _entry_blocked_until, cached_equity)
+                    _process_mean_reversion(symbol, api, portfolio, risk, _entry_blocked_until, cached_equity, close_only=_close_only)
                 elif strategy == "momentum_breakout":
-                    _process_momentum_breakout(symbol, api, portfolio, risk, _entry_blocked_until, _pending_signals, cached_equity)
+                    _process_momentum_breakout(symbol, api, portfolio, risk, _entry_blocked_until, _pending_signals, cached_equity, close_only=_close_only)
                 elif strategy == "trend_following":
-                    _process_trend_following(symbol, api, portfolio, risk, _pending_signals, cached_equity)
+                    _process_trend_following(symbol, api, portfolio, risk, _pending_signals, cached_equity, close_only=_close_only)
             except tradeapi.rest.APIError as exc:
                 logger.error("Alpaca API error for %s: %s", symbol, exc)
             except Exception as exc:

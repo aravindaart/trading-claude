@@ -71,7 +71,7 @@ class Portfolio:
         self,
         symbol: str,
         direction: str,
-        qty: int,
+        qty: int | float,
         entry_price: float,
         hard_stop: float,
         trailing_stop_distance: float | None = None,
