@@ -5,15 +5,17 @@ Tracks open positions, submits orders via the Alpaca API,
 and writes trade records to trades.csv and daily_pnl.csv.
 """
 import csv
+import json
 import logging
 import os
+import time
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import alpaca_trade_api as tradeapi
 
 from config import DAILY_PNL_CSV, INSTRUMENTS, LOG_DIR, TIMEZONE, TRADES_CSV
-from bot import telegram
+from bot import database, telegram
 
 logger = logging.getLogger(__name__)
 TZ = ZoneInfo(TIMEZONE)
@@ -69,7 +71,7 @@ class Portfolio:
         self,
         symbol: str,
         direction: str,
-        qty: int,
+        qty: int | float,
         entry_price: float,
         hard_stop: float,
         trailing_stop_distance: float | None = None,
@@ -137,7 +139,7 @@ class Portfolio:
         alpaca_symbol = symbol  # keep as-is; Alpaca crypto endpoint uses "BTC/USD"
 
         try:
-            self._api.submit_order(
+            close_order = self._api.submit_order(
                 symbol=alpaca_symbol,
                 qty=pos["qty"],
                 side=side,
@@ -149,20 +151,39 @@ class Portfolio:
             logger.error("Failed to close position for %s: %s", symbol, exc)
             return False
 
-        if pos["direction"] == "long":
-            pnl = (exit_price - pos["entry_price"]) * pos["qty"]
-        else:
-            pnl = (pos["entry_price"] - exit_price) * pos["qty"]
+        # Poll for fill confirmation (up to 5 s) so we record the actual fill price
+        fill_price = exit_price
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            time.sleep(0.5)
+            try:
+                status = self._api.get_order(close_order.id)
+                if status.status == "filled":
+                    if status.filled_avg_price:
+                        fill_price = float(status.filled_avg_price)
+                    break
+                if status.status in ("canceled", "rejected", "expired"):
+                    logger.error("Close order for %s was %s — position NOT removed", symbol, status.status)
+                    return False
+            except Exception:
+                break  # can't check; proceed with estimated price
 
-        _append_csv(TRADES_CSV, TRADES_HEADERS, {
+        if pos["direction"] == "long":
+            pnl = (fill_price - pos["entry_price"]) * pos["qty"]
+        else:
+            pnl = (pos["entry_price"] - fill_price) * pos["qty"]
+
+        trade_row = {
             "timestamp": datetime.now(TZ).isoformat(),
             "instrument": symbol,
             "direction": pos["direction"],
             "entry_price": round(pos["entry_price"], 6),
-            "exit_price": round(exit_price, 6),
+            "exit_price": round(fill_price, 6),
             "pnl": round(pnl, 2),
             "position_size": pos["qty"],
-        })
+        }
+        _append_csv(TRADES_CSV, TRADES_HEADERS, trade_row)
+        database.insert_trade(trade_row)
         logger.info("Closed %s direction=%s pnl=%.2f", symbol, pos["direction"], pnl)
 
         emoji = "✅" if pnl >= 0 else "❌"
@@ -170,7 +191,7 @@ class Portfolio:
         telegram.send_message(
             f"{emoji} *TRADE CLOSED* — {symbol}\n"
             f"Direction: {pos['direction'].upper()}\n"
-            f"Entry: ${pos['entry_price']:.4f} → Exit: ${exit_price:.4f}\n"
+            f"Entry: ${pos['entry_price']:.4f} → Exit: ${fill_price:.4f}\n"
             f"P&L: *{sign}${pnl:.2f}*\n"
             f"Reason: {reason}"
         )
@@ -193,13 +214,15 @@ class Portfolio:
         pnl = equity - self._day_start_equity
         pnl_pct = pnl / self._day_start_equity * 100
 
-        _append_csv(DAILY_PNL_CSV, DAILY_PNL_HEADERS, {
+        pnl_row = {
             "date": date.today().isoformat(),
             "starting_equity": round(self._day_start_equity, 2),
             "ending_equity": round(equity, 2),
             "pnl": round(pnl, 2),
             "pnl_pct": round(pnl_pct, 4),
-        })
+        }
+        _append_csv(DAILY_PNL_CSV, DAILY_PNL_HEADERS, pnl_row)
+        database.upsert_daily_pnl(pnl_row)
         logger.info("Daily P&L: %.2f (%.2f%%)", pnl, pnl_pct)
         self._day_start_equity = None
 
@@ -255,6 +278,27 @@ class Portfolio:
 
     def position_direction(self, symbol: str) -> str | None:
         return self.open_positions.get(symbol, {}).get("direction")
+
+    def save_state(self, path: str = "logs/positions.json"):
+        """Write open_positions to JSON so the next run can rehydrate."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(self.open_positions, f, indent=2)
+        database.upsert_positions(self.open_positions)
+
+    def load_state(self, path: str = "logs/positions.json"):
+        """Populate open_positions from JSON. Call before sync_with_broker() so broker reconciliation can prune stale entries."""
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path) as f:
+                saved = json.load(f)
+            for symbol, pos in saved.items():
+                if symbol not in self.open_positions:
+                    self.open_positions[symbol] = pos
+            logger.info("State restored from %s: %s", path, list(saved.keys()))
+        except Exception as exc:
+            logger.warning("Could not load state from %s: %s", path, exc)
 
     def sync_with_broker(self):
         """Reconcile local state against Alpaca positions (called on startup)."""

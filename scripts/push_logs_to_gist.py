@@ -6,7 +6,7 @@ token = os.environ["GH_GIST_TOKEN"]
 gist_id = os.environ["GIST_ID"]
 
 files = {}
-for fname in ["trades.csv", "daily_pnl.csv", "bot.log", ".last_briefing_date"]:
+for fname in ["trades.csv", "daily_pnl.csv", "bot.log", ".last_briefing_date", "positions.json"]:
     path = f"logs/{fname}"
     if os.path.exists(path):
         with open(path) as f:
