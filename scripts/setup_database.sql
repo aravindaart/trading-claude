@@ -37,10 +37,19 @@ CREATE TABLE IF NOT EXISTS positions (
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Live bot activity log (heartbeat every 5 min + trade events + warnings/errors)
+CREATE TABLE IF NOT EXISTS bot_events (
+  id      BIGSERIAL PRIMARY KEY,
+  ts      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  level   TEXT NOT NULL,
+  message TEXT NOT NULL
+);
+
 -- Enable Row Level Security on all tables
-ALTER TABLE trades    ENABLE ROW LEVEL SECURITY;
-ALTER TABLE daily_pnl ENABLE ROW LEVEL SECURITY;
-ALTER TABLE positions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trades     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE daily_pnl  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE positions  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bot_events ENABLE ROW LEVEL SECURITY;
 
 -- Anon key (embedded in the browser dashboard) can only SELECT.
 -- service_role key (GitHub Actions secret) bypasses RLS and can write.
@@ -48,6 +57,9 @@ DROP POLICY IF EXISTS "anon_read_trades"     ON trades;
 DROP POLICY IF EXISTS "anon_read_daily_pnl"  ON daily_pnl;
 DROP POLICY IF EXISTS "anon_read_positions"  ON positions;
 
-CREATE POLICY "anon_read_trades"    ON trades    FOR SELECT USING (true);
-CREATE POLICY "anon_read_daily_pnl" ON daily_pnl FOR SELECT USING (true);
-CREATE POLICY "anon_read_positions" ON positions FOR SELECT USING (true);
+DROP POLICY IF EXISTS "anon_read_bot_events" ON bot_events;
+
+CREATE POLICY "anon_read_trades"     ON trades     FOR SELECT USING (true);
+CREATE POLICY "anon_read_daily_pnl"  ON daily_pnl  FOR SELECT USING (true);
+CREATE POLICY "anon_read_positions"  ON positions  FOR SELECT USING (true);
+CREATE POLICY "anon_read_bot_events" ON bot_events FOR SELECT USING (true);

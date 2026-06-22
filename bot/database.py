@@ -80,3 +80,29 @@ def upsert_positions(positions: dict) -> bool:
     except Exception as exc:
         logger.warning("DB upsert_positions failed: %s", exc)
         return False
+
+
+def insert_event(level: str, message: str) -> bool:
+    if not _enabled():
+        return False
+    try:
+        r = requests.post(
+            f"{_URL}/rest/v1/bot_events",
+            json={"level": level, "message": message},
+            headers=_headers(),
+            timeout=5,
+        )
+        r.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
+class SupabaseLogHandler(logging.Handler):
+    """Forwards WARNING+ log records to the Supabase bot_events table."""
+
+    def emit(self, record: logging.LogRecord):
+        try:
+            insert_event(record.levelname, self.format(record))
+        except Exception:
+            pass
