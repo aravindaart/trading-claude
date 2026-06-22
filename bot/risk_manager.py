@@ -60,28 +60,33 @@ class RiskManager:
     # Hard stop price
     # ------------------------------------------------------------------
 
-    def calc_hard_stop(self, direction: str, entry_price: float) -> float:
-        """Return the hard stop price that limits loss to 1% of equity."""
+    def calc_hard_stop(self, direction: str, entry_price: float, qty: int) -> float:
+        """Return the hard stop price that limits total loss to hard_stop_pct of equity."""
         equity = self.get_equity()
-        price = entry_price
-
-        # Stop distance in dollars per share such that total loss = hard_stop_pct * equity
-        # We'll use price * hard_stop_pct as a simple percentage of entry price as fallback
-        stop_distance = price * RISK["hard_stop_pct"]
-
+        # Dollar loss budget divided by share count gives the per-share stop distance
+        stop_distance = (equity * RISK["hard_stop_pct"]) / max(qty, 1)
         if direction == "long":
-            return price - stop_distance
-        return price + stop_distance
+            return entry_price - stop_distance
+        return entry_price + stop_distance
 
     # ------------------------------------------------------------------
     # Correlation filter
     # ------------------------------------------------------------------
 
+    MAX_CONCURRENT_POSITIONS = 4
+
     def correlation_filter_allows(self, new_symbol: str, new_direction: str, open_positions: dict) -> bool:
         """
-        Block any new crypto long if SPY and QQQ are both already long.
-        Prevents doubling up on risk-on exposure across equity and crypto.
+        Block new entries when the portfolio is already at max concurrent positions,
+        or when adding a new crypto long while SPY and QQQ are both long.
         """
+        if len(open_positions) >= self.MAX_CONCURRENT_POSITIONS:
+            logger.info(
+                "Correlation filter: blocking %s — max %d concurrent positions reached",
+                new_symbol, self.MAX_CONCURRENT_POSITIONS,
+            )
+            return False
+
         crypto_symbols = {"BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"}
         if new_symbol not in crypto_symbols or new_direction != "long":
             return True

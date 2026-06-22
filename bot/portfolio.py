@@ -7,6 +7,7 @@ and writes trade records to trades.csv and daily_pnl.csv.
 import csv
 import logging
 import os
+import time
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -137,7 +138,7 @@ class Portfolio:
         alpaca_symbol = symbol  # keep as-is; Alpaca crypto endpoint uses "BTC/USD"
 
         try:
-            self._api.submit_order(
+            close_order = self._api.submit_order(
                 symbol=alpaca_symbol,
                 qty=pos["qty"],
                 side=side,
@@ -149,17 +150,34 @@ class Portfolio:
             logger.error("Failed to close position for %s: %s", symbol, exc)
             return False
 
+        # Poll for fill confirmation (up to 5 s) so we record the actual fill price
+        fill_price = exit_price
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            time.sleep(0.5)
+            try:
+                status = self._api.get_order(close_order.id)
+                if status.status == "filled":
+                    if status.filled_avg_price:
+                        fill_price = float(status.filled_avg_price)
+                    break
+                if status.status in ("canceled", "rejected", "expired"):
+                    logger.error("Close order for %s was %s — position NOT removed", symbol, status.status)
+                    return False
+            except Exception:
+                break  # can't check; proceed with estimated price
+
         if pos["direction"] == "long":
-            pnl = (exit_price - pos["entry_price"]) * pos["qty"]
+            pnl = (fill_price - pos["entry_price"]) * pos["qty"]
         else:
-            pnl = (pos["entry_price"] - exit_price) * pos["qty"]
+            pnl = (pos["entry_price"] - fill_price) * pos["qty"]
 
         _append_csv(TRADES_CSV, TRADES_HEADERS, {
             "timestamp": datetime.now(TZ).isoformat(),
             "instrument": symbol,
             "direction": pos["direction"],
             "entry_price": round(pos["entry_price"], 6),
-            "exit_price": round(exit_price, 6),
+            "exit_price": round(fill_price, 6),
             "pnl": round(pnl, 2),
             "position_size": pos["qty"],
         })
@@ -170,7 +188,7 @@ class Portfolio:
         telegram.send_message(
             f"{emoji} *TRADE CLOSED* — {symbol}\n"
             f"Direction: {pos['direction'].upper()}\n"
-            f"Entry: ${pos['entry_price']:.4f} → Exit: ${exit_price:.4f}\n"
+            f"Entry: ${pos['entry_price']:.4f} → Exit: ${fill_price:.4f}\n"
             f"P&L: *{sign}${pnl:.2f}*\n"
             f"Reason: {reason}"
         )

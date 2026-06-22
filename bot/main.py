@@ -63,6 +63,16 @@ BARS_NEEDED = {
     "trend_following": 250,
 }
 
+# After a failed order, suppress re-entry for one full bar period
+_COOLDOWN_MINUTES = {
+    "mean_reversion": 15,
+    "momentum_breakout": 60,
+    "trend_following": 240,
+}
+
+# Max bars a mean-reversion position can be held before forced exit (8 × 15 min = 2 h)
+_MEAN_REVERSION_MAX_HOLD_BARS = 8
+
 
 def _build_api() -> tradeapi.REST:
     return tradeapi.REST(
@@ -147,7 +157,8 @@ def _is_equity_market_open(api: tradeapi.REST) -> bool:
 
 
 def _process_mean_reversion(
-    symbol: str, api: tradeapi.REST, portfolio: Portfolio, risk: RiskManager
+    symbol: str, api: tradeapi.REST, portfolio: Portfolio, risk: RiskManager,
+    entry_blocked_until: dict,
 ):
     cfg = MEAN_REVERSION
     bars = _fetch_bars(api, symbol, cfg["timeframe"], BARS_NEEDED["mean_reversion"])
@@ -157,17 +168,33 @@ def _process_mean_reversion(
     current_price = float(bars["close"].iloc[-1])
 
     if portfolio.has_position(symbol):
-        # Check stops
         portfolio.update_trailing_stop(symbol, current_price)
         hit, reason = portfolio.is_any_stop_hit(symbol, current_price)
         if hit:
             portfolio.close_position(symbol, current_price, reason=reason)
             return
 
-        # Check mean-reversion exit
+        # Force-exit after max holding period to avoid riding a trend indefinitely
+        pos = portfolio.open_positions[symbol]
+        opened_at = datetime.fromisoformat(pos["opened_at"])
+        bars_held = (datetime.now(TZ) - opened_at).total_seconds() / (15 * 60)
+        if bars_held >= _MEAN_REVERSION_MAX_HOLD_BARS:
+            portfolio.close_position(
+                symbol, current_price,
+                reason=f"max hold period ({_MEAN_REVERSION_MAX_HOLD_BARS} bars) reached",
+            )
+            return
+
         direction = portfolio.position_direction(symbol)
         if mean_reversion.check_exit(symbol, bars, direction):
             portfolio.close_position(symbol, current_price, reason="reverted to mean")
+        return
+
+    # Cooldown check — skip entry if a recent order failed
+    now = datetime.now(TZ)
+    blocked_until = entry_blocked_until.get(symbol)
+    if blocked_until and now < blocked_until:
+        logger.debug("%s: entry cooldown active until %s", symbol, blocked_until.isoformat())
         return
 
     signal = mean_reversion.generate_signal(symbol, bars)
@@ -187,13 +214,18 @@ def _process_mean_reversion(
     if qty <= 0:
         return
 
-    hard_stop = risk.calc_hard_stop(signal["direction"], current_price)
-    portfolio.open_position(symbol, signal["direction"], qty, current_price, hard_stop)
-    logger.info("SIGNAL %s %s: %s", symbol, signal["direction"].upper(), signal["reason"])
+    hard_stop = risk.calc_hard_stop(signal["direction"], current_price, qty)
+    opened = portfolio.open_position(symbol, signal["direction"], qty, current_price, hard_stop)
+    if opened:
+        logger.info("SIGNAL %s %s: %s", symbol, signal["direction"].upper(), signal["reason"])
+    else:
+        entry_blocked_until[symbol] = now + timedelta(minutes=_COOLDOWN_MINUTES["mean_reversion"])
+        logger.warning("%s: open_position failed, cooling down for %d min", symbol, _COOLDOWN_MINUTES["mean_reversion"])
 
 
 def _process_momentum_breakout(
-    symbol: str, api: tradeapi.REST, portfolio: Portfolio, risk: RiskManager
+    symbol: str, api: tradeapi.REST, portfolio: Portfolio, risk: RiskManager,
+    entry_blocked_until: dict, pending_signals: dict,
 ):
     cfg = MOMENTUM_BREAKOUT
     bars = _fetch_bars(api, symbol, cfg["timeframe"], BARS_NEEDED["momentum_breakout"])
@@ -203,6 +235,7 @@ def _process_momentum_breakout(
     current_price = float(bars["close"].iloc[-1])
 
     if portfolio.has_position(symbol):
+        pending_signals.pop(symbol, None)
         portfolio.update_trailing_stop(symbol, current_price)
         hit, reason = portfolio.is_any_stop_hit(symbol, current_price)
         if hit:
@@ -210,12 +243,28 @@ def _process_momentum_breakout(
         return
 
     signal = momentum_breakout.generate_signal(symbol, bars)
-    if signal is None:
-        return
 
     # Alpaca does not support crypto short selling — skip short signals for crypto symbols
-    if _is_crypto(symbol) and signal["direction"] == "short":
+    if signal is not None and _is_crypto(symbol) and signal["direction"] == "short":
         logger.debug("%s: skipping short signal — crypto short selling not supported", symbol)
+        signal = None
+
+    if signal is None:
+        pending_signals.pop(symbol, None)
+        return
+
+    # 1-bar confirmation: only enter if the same signal direction was seen last cycle
+    prev = pending_signals.get(symbol)
+    pending_signals[symbol] = signal
+    if prev is None or prev["direction"] != signal["direction"]:
+        logger.debug("%s: new %s signal — waiting for 1-bar confirmation", symbol, signal["direction"])
+        return
+
+    # Cooldown check
+    now = datetime.now(TZ)
+    blocked_until = entry_blocked_until.get(symbol)
+    if blocked_until and now < blocked_until:
+        logger.debug("%s: entry cooldown active until %s", symbol, blocked_until.isoformat())
         return
 
     if not risk.correlation_filter_allows(symbol, signal["direction"], portfolio.open_positions):
@@ -226,16 +275,22 @@ def _process_momentum_breakout(
     if qty <= 0:
         return
 
-    hard_stop = risk.calc_hard_stop(signal["direction"], current_price)
-    portfolio.open_position(
+    hard_stop = risk.calc_hard_stop(signal["direction"], current_price, qty)
+    opened = portfolio.open_position(
         symbol, signal["direction"], qty, current_price,
         hard_stop, trailing_stop_distance=signal["trailing_stop"],
     )
-    logger.info("SIGNAL %s %s: %s", symbol, signal["direction"].upper(), signal["reason"])
+    if opened:
+        pending_signals.pop(symbol, None)
+        logger.info("SIGNAL %s %s: %s", symbol, signal["direction"].upper(), signal["reason"])
+    else:
+        entry_blocked_until[symbol] = now + timedelta(minutes=_COOLDOWN_MINUTES["momentum_breakout"])
+        logger.warning("%s: open_position failed, cooling down for %d min", symbol, _COOLDOWN_MINUTES["momentum_breakout"])
 
 
 def _process_trend_following(
-    symbol: str, api: tradeapi.REST, portfolio: Portfolio, risk: RiskManager
+    symbol: str, api: tradeapi.REST, portfolio: Portfolio, risk: RiskManager,
+    pending_signals: dict,
 ):
     cfg = TREND_FOLLOWING
     bars = _fetch_bars(api, symbol, cfg["timeframe"], BARS_NEEDED["trend_following"])
@@ -249,27 +304,33 @@ def _process_trend_following(
         hit, reason = portfolio.is_any_stop_hit(symbol, current_price)
         if hit:
             portfolio.close_position(symbol, current_price, reason=reason)
+            pending_signals.pop(symbol, None)
             return
 
-        # Also close on death cross while long, or golden cross while short
+        # Close on cross reversal; re-entry handled via pending_signals on the next cycle
         signal = trend_following.generate_signal(symbol, bars)
         if signal:
             current_dir = portfolio.position_direction(symbol)
             if signal["direction"] != current_dir:
-                portfolio.close_position(symbol, current_price, reason=f"cross signal reversal: {signal['reason']}")
-                # Immediately re-enter in new direction
-                atr = signal.get("atr", current_price * 0.01)
-                qty = risk.calc_position_size(atr, current_price)
-                if qty > 0:
-                    hard_stop = risk.calc_hard_stop(signal["direction"], current_price)
-                    portfolio.open_position(
-                        symbol, signal["direction"], qty, current_price,
-                        hard_stop, trailing_stop_distance=signal["trailing_stop"],
-                    )
+                closed = portfolio.close_position(
+                    symbol, current_price,
+                    reason=f"cross signal reversal: {signal['reason']}",
+                )
+                if closed:
+                    # Stage the new direction for 1-bar confirmation on next poll
+                    pending_signals[symbol] = signal
         return
 
     signal = trend_following.generate_signal(symbol, bars)
     if signal is None:
+        pending_signals.pop(symbol, None)
+        return
+
+    # 1-bar confirmation: only enter if the same signal direction was seen last cycle
+    prev = pending_signals.get(symbol)
+    pending_signals[symbol] = signal
+    if prev is None or prev["direction"] != signal["direction"]:
+        logger.debug("%s: new %s signal — waiting for 1-bar confirmation", symbol, signal["direction"])
         return
 
     if not risk.correlation_filter_allows(symbol, signal["direction"], portfolio.open_positions):
@@ -280,12 +341,14 @@ def _process_trend_following(
     if qty <= 0:
         return
 
-    hard_stop = risk.calc_hard_stop(signal["direction"], current_price)
-    portfolio.open_position(
+    hard_stop = risk.calc_hard_stop(signal["direction"], current_price, qty)
+    opened = portfolio.open_position(
         symbol, signal["direction"], qty, current_price,
         hard_stop, trailing_stop_distance=signal["trailing_stop"],
     )
-    logger.info("SIGNAL %s %s: %s", symbol, signal["direction"].upper(), signal["reason"])
+    if opened:
+        pending_signals.pop(symbol, None)
+        logger.info("SIGNAL %s %s: %s", symbol, signal["direction"].upper(), signal["reason"])
 
 
 # ------------------------------------------------------------------
@@ -304,6 +367,11 @@ def run():
     equity_day_start_recorded = False
     last_day: int | None = None
     _BRIEFING_MARKER = "logs/.last_briefing_date"
+
+    # Cooldown tracking: symbol → datetime after which re-entry is allowed
+    _entry_blocked_until: dict[str, datetime] = {}
+    # Signal confirmation: symbol → last seen signal dict (for 1-bar confirmation)
+    _pending_signals: dict[str, dict] = {}
 
     def _already_briefed_today() -> bool:
         try:
@@ -366,11 +434,11 @@ def run():
 
             try:
                 if strategy == "mean_reversion":
-                    _process_mean_reversion(symbol, api, portfolio, risk)
+                    _process_mean_reversion(symbol, api, portfolio, risk, _entry_blocked_until)
                 elif strategy == "momentum_breakout":
-                    _process_momentum_breakout(symbol, api, portfolio, risk)
+                    _process_momentum_breakout(symbol, api, portfolio, risk, _entry_blocked_until, _pending_signals)
                 elif strategy == "trend_following":
-                    _process_trend_following(symbol, api, portfolio, risk)
+                    _process_trend_following(symbol, api, portfolio, risk, _pending_signals)
             except tradeapi.rest.APIError as exc:
                 logger.error("Alpaca API error for %s: %s", symbol, exc)
             except Exception as exc:
