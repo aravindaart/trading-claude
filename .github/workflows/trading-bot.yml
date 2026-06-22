@@ -45,3 +45,16 @@ jobs:
           GH_GIST_TOKEN: ${{ secrets.GH_GIST_TOKEN }}
           GIST_ID: ${{ secrets.GIST_ID }}
         run: python scripts/push_logs_to_gist.py
+
+      - name: Generate dashboard
+        if: always()
+        run: python scripts/generate_dashboard.py
+
+      - name: Commit and push dashboard
+        if: always()
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add docs/index.html
+          git diff --staged --quiet || git commit -m "chore: update dashboard [skip ci]"
+          git push

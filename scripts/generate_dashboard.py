@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+"""Generate a static monitoring dashboard from trading bot log files.
+
+Reads logs/*.csv, logs/positions.json, and logs/bot.log, then writes
+docs/index.html with all data embedded as JSON — no runtime HTTP calls
+or authentication needed in the browser.
+"""
+
+import csv
+import json
+import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+LOG_DIR = "logs"
+OUT_DIR = "docs"
+TZ = ZoneInfo("America/New_York")
+
+
+def _read_csv(path: str) -> list[dict]:
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, newline="") as f:
+            return list(csv.DictReader(f))
+    except Exception:
+        return []
+
+
+def _read_json(path: str) -> dict:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _read_log_tail(path: str, lines: int = 150) -> str:
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path) as f:
+            all_lines = f.readlines()
+        return "".join(all_lines[-lines:])
+    except Exception:
+        return ""
+
+
+def _compute_stats(trades: list[dict]) -> dict:
+    pnls = []
+    for t in trades:
+        try:
+            pnls.append(float(t["pnl"]))
+        except (KeyError, ValueError):
+            pass
+
+    if not pnls:
+        return {
+            "total_trades": 0,
+            "win_count": 0,
+            "loss_count": 0,
+            "win_rate": 0,
+            "avg_win": 0,
+            "avg_loss": 0,
+            "profit_factor": 0,
+            "total_pnl": 0,
+        }
+
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+
+    return {
+        "total_trades": len(pnls),
+        "win_count": len(wins),
+        "loss_count": len(losses),
+        "win_rate": round(len(wins) / len(pnls) * 100, 1),
+        "avg_win": round(gross_profit / len(wins), 2) if wins else 0,
+        "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
+        "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else 0,
+        "total_pnl": round(sum(pnls), 2),
+    }
+
+
+HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trading Bot Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    .pnl-pos { color: #4ade80; font-weight: 600; }
+    .pnl-neg { color: #f87171; font-weight: 600; }
+  </style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen font-mono text-sm">
+<script>window.__DATA__ = DATA_JSON_PLACEHOLDER;</script>
+
+<div class="max-w-7xl mx-auto p-4 space-y-4">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between">
+    <h1 class="text-xl font-bold">Trading Bot <span class="text-green-400">Monitor</span></h1>
+    <div class="text-xs text-gray-400">Updated: <span id="gen-at"></span></div>
+  </div>
+
+  <!-- Summary Cards -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+    <div class="bg-gray-800 rounded-xl p-4">
+      <div class="text-xs text-gray-400 mb-1">Account Equity</div>
+      <div class="text-xl font-bold text-white" id="c-equity">—</div>
+    </div>
+    <div class="bg-gray-800 rounded-xl p-4">
+      <div class="text-xs text-gray-400 mb-1">Today's P&amp;L</div>
+      <div class="text-xl font-bold" id="c-today-pnl">—</div>
+    </div>
+    <div class="bg-gray-800 rounded-xl p-4">
+      <div class="text-xs text-gray-400 mb-1">Open Positions</div>
+      <div class="text-xl font-bold text-white" id="c-open">—</div>
+    </div>
+    <div class="bg-gray-800 rounded-xl p-4">
+      <div class="text-xs text-gray-400 mb-1">Total Trades</div>
+      <div class="text-xl font-bold text-white" id="c-trades">—</div>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <div class="bg-gray-800 rounded-xl p-4">
+      <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">Equity Curve</h2>
+      <div id="eq-empty" class="text-gray-500 text-xs hidden">No data yet.</div>
+      <canvas id="equity-chart"></canvas>
+    </div>
+    <div class="bg-gray-800 rounded-xl p-4">
+      <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">Daily P&amp;L</h2>
+      <div id="pnl-empty" class="text-gray-500 text-xs hidden">No data yet.</div>
+      <canvas id="pnl-chart"></canvas>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+    <div class="bg-gray-800 rounded-xl p-4">
+      <div class="text-xs text-gray-400 mb-1">Win Rate</div>
+      <div class="text-lg font-bold text-white" id="s-winrate">—</div>
+    </div>
+    <div class="bg-gray-800 rounded-xl p-4">
+      <div class="text-xs text-gray-400 mb-1">Avg Win</div>
+      <div class="text-lg font-bold pnl-pos" id="s-avgwin">—</div>
+    </div>
+    <div class="bg-gray-800 rounded-xl p-4">
+      <div class="text-xs text-gray-400 mb-1">Avg Loss</div>
+      <div class="text-lg font-bold pnl-neg" id="s-avgloss">—</div>
+    </div>
+    <div class="bg-gray-800 rounded-xl p-4">
+      <div class="text-xs text-gray-400 mb-1">Profit Factor</div>
+      <div class="text-lg font-bold text-white" id="s-pf">—</div>
+    </div>
+  </div>
+
+  <!-- Open Positions -->
+  <div class="bg-gray-800 rounded-xl p-4">
+    <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">Open Positions</h2>
+    <p id="pos-empty" class="text-gray-500 text-xs">No open positions.</p>
+    <div class="overflow-x-auto hidden" id="pos-wrap">
+      <table class="w-full text-xs">
+        <thead><tr class="text-gray-500 border-b border-gray-700">
+          <th class="text-left pb-2 pr-4">Symbol</th>
+          <th class="text-left pb-2 pr-4">Dir</th>
+          <th class="text-right pb-2 pr-4">Qty</th>
+          <th class="text-right pb-2 pr-4">Entry</th>
+          <th class="text-right pb-2 pr-4">Hard Stop</th>
+          <th class="text-right pb-2 pr-4">Trail Stop</th>
+          <th class="text-right pb-2">Held</th>
+        </tr></thead>
+        <tbody id="pos-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Recent Trades -->
+  <div class="bg-gray-800 rounded-xl p-4">
+    <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">Recent Trades</h2>
+    <p id="tr-empty" class="text-gray-500 text-xs">No closed trades yet.</p>
+    <div class="overflow-x-auto hidden" id="tr-wrap">
+      <table class="w-full text-xs">
+        <thead><tr class="text-gray-500 border-b border-gray-700">
+          <th class="text-left pb-2 pr-4">Time</th>
+          <th class="text-left pb-2 pr-4">Symbol</th>
+          <th class="text-left pb-2 pr-4">Dir</th>
+          <th class="text-right pb-2 pr-4">Qty</th>
+          <th class="text-right pb-2 pr-4">Entry</th>
+          <th class="text-right pb-2 pr-4">Exit</th>
+          <th class="text-right pb-2">P&amp;L</th>
+        </tr></thead>
+        <tbody id="tr-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Bot Log -->
+  <div class="bg-gray-800 rounded-xl p-4">
+    <button onclick="toggleLog()" class="text-xs font-semibold text-gray-400 uppercase tracking-wide flex items-center gap-2 w-full text-left">
+      <span id="log-icon">&#9654;</span> Bot Log (last 150 lines)
+    </button>
+    <div id="log-wrap" class="hidden mt-3">
+      <pre id="log-pre" class="text-xs text-green-300 bg-gray-900 rounded p-3 max-h-96 overflow-y-auto whitespace-pre-wrap break-all"></pre>
+    </div>
+  </div>
+
+  <p class="text-center text-xs text-gray-600 pb-2">Paper trading only &middot; Alpaca Markets &middot; Refreshes every 5 hours</p>
+</div>
+
+<script>
+const D = window.__DATA__;
+
+const $ = id => document.getElementById(id);
+
+function fmt$(v) {
+  const n = parseFloat(v);
+  if (isNaN(n)) return '—';
+  return '$' + n.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+function sign$(v) {
+  const n = parseFloat(v);
+  if (isNaN(n)) return '—';
+  return (n >= 0 ? '+' : '') + fmt$(n);
+}
+function pnlCls(v) { return parseFloat(v) >= 0 ? 'pnl-pos' : 'pnl-neg'; }
+function fmtTs(iso) { return iso ? iso.slice(0, 16).replace('T', ' ') : '—'; }
+function heldSince(iso) {
+  if (!iso) return '—';
+  const ms = Date.now() - new Date(iso).getTime();
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.floor((ms % 3_600_000) / 60_000);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+// Header
+$('gen-at').textContent = D.generated_at;
+
+// Summary
+const daily = D.daily_pnl;
+const last = daily.length ? daily[daily.length - 1] : null;
+$('c-equity').textContent = last ? fmt$(last.ending_equity) : '—';
+if (last) {
+  const pnlEl = $('c-today-pnl');
+  pnlEl.textContent = sign$(last.pnl);
+  pnlEl.className = 'text-xl font-bold ' + pnlCls(last.pnl);
+}
+$('c-open').textContent = Object.keys(D.positions).length;
+$('c-trades').textContent = D.stats.total_trades;
+
+// Stats
+const s = D.stats;
+$('s-winrate').textContent = s.total_trades ? `${s.win_rate}% (${s.win_count}W / ${s.loss_count}L)` : '—';
+$('s-avgwin').textContent = s.avg_win ? fmt$(s.avg_win) : '—';
+$('s-avgloss').textContent = s.avg_loss ? fmt$(s.avg_loss) : '—';
+$('s-pf').textContent = s.profit_factor || '—';
+
+// Charts
+const chartDefaults = {
+  responsive: true,
+  plugins: { legend: { display: false } },
+  scales: {
+    x: { ticks: { color: '#9ca3af', maxTicksLimit: 8, font: { size: 10 } }, grid: { color: '#374151' } },
+    y: { ticks: { color: '#9ca3af', font: { size: 10 } }, grid: { color: '#374151' } },
+  },
+};
+
+if (daily.length > 0) {
+  new Chart($('equity-chart'), {
+    type: 'line',
+    data: {
+      labels: daily.map(d => d.date),
+      datasets: [{
+        data: daily.map(d => parseFloat(d.ending_equity)),
+        borderColor: '#4ade80', backgroundColor: 'rgba(74,222,128,0.07)',
+        borderWidth: 2, fill: true, tension: 0.3,
+        pointRadius: daily.length > 30 ? 0 : 3,
+      }],
+    },
+    options: { ...chartDefaults, scales: { ...chartDefaults.scales,
+      y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, callback: v => '$' + v.toLocaleString() } },
+    }},
+  });
+} else { $('eq-empty').classList.remove('hidden'); $('equity-chart').remove(); }
+
+if (daily.length > 0) {
+  const pnls = daily.map(d => parseFloat(d.pnl));
+  new Chart($('pnl-chart'), {
+    type: 'bar',
+    data: {
+      labels: daily.map(d => d.date),
+      datasets: [{
+        data: pnls,
+        backgroundColor: pnls.map(v => v >= 0 ? 'rgba(74,222,128,0.75)' : 'rgba(248,113,113,0.75)'),
+        borderRadius: 3,
+      }],
+    },
+    options: { ...chartDefaults, scales: { ...chartDefaults.scales,
+      y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, callback: v => '$' + v.toLocaleString() } },
+    }},
+  });
+} else { $('pnl-empty').classList.remove('hidden'); $('pnl-chart').remove(); }
+
+// Open positions
+const posKeys = Object.keys(D.positions);
+if (posKeys.length > 0) {
+  $('pos-empty').remove();
+  $('pos-wrap').classList.remove('hidden');
+  const tbody = $('pos-body');
+  posKeys.forEach(sym => {
+    const p = D.positions[sym];
+    const dCls = p.direction === 'long' ? 'text-green-400' : 'text-red-400';
+    tbody.insertAdjacentHTML('beforeend',
+      `<tr class="border-b border-gray-700 hover:bg-gray-750">
+        <td class="py-2 pr-4 font-semibold">${sym}</td>
+        <td class="py-2 pr-4 ${dCls} uppercase">${p.direction}</td>
+        <td class="py-2 pr-4 text-right">${p.qty}</td>
+        <td class="py-2 pr-4 text-right">${fmt$(p.entry_price)}</td>
+        <td class="py-2 pr-4 text-right text-red-400">${fmt$(p.hard_stop)}</td>
+        <td class="py-2 pr-4 text-right text-yellow-400">${p.trailing_stop != null ? fmt$(p.trailing_stop) : '—'}</td>
+        <td class="py-2 text-right text-gray-400">${heldSince(p.opened_at)}</td>
+      </tr>`);
+  });
+}
+
+// Recent trades (newest first)
+const trades = D.trades.slice().reverse();
+if (trades.length > 0) {
+  $('tr-empty').remove();
+  $('tr-wrap').classList.remove('hidden');
+  const tbody = $('tr-body');
+  trades.forEach(t => {
+    const dCls = t.direction === 'long' ? 'text-green-400' : 'text-red-400';
+    tbody.insertAdjacentHTML('beforeend',
+      `<tr class="border-b border-gray-700 hover:bg-gray-750">
+        <td class="py-2 pr-4 text-gray-400">${fmtTs(t.timestamp)}</td>
+        <td class="py-2 pr-4 font-semibold">${t.instrument}</td>
+        <td class="py-2 pr-4 ${dCls} uppercase">${t.direction}</td>
+        <td class="py-2 pr-4 text-right">${t.position_size}</td>
+        <td class="py-2 pr-4 text-right">${fmt$(t.entry_price)}</td>
+        <td class="py-2 pr-4 text-right">${fmt$(t.exit_price)}</td>
+        <td class="py-2 text-right ${pnlCls(t.pnl)}">${sign$(t.pnl)}</td>
+      </tr>`);
+  });
+}
+
+// Log
+$('log-pre').textContent = D.log_tail || 'No log data yet.';
+
+function toggleLog() {
+  const wrap = $('log-wrap');
+  const hidden = wrap.classList.toggle('hidden');
+  $('log-icon').innerHTML = hidden ? '&#9654;' : '&#9660;';
+  if (!hidden) { const pre = $('log-pre'); pre.scrollTop = pre.scrollHeight; }
+}
+</script>
+</body>
+</html>
+"""
+
+
+def main():
+    trades = _read_csv(f"{LOG_DIR}/trades.csv")
+    daily_pnl = _read_csv(f"{LOG_DIR}/daily_pnl.csv")
+    positions = _read_json(f"{LOG_DIR}/positions.json")
+    log_tail = _read_log_tail(f"{LOG_DIR}/bot.log")
+    stats = _compute_stats(trades)
+
+    data = {
+        "trades": trades[-30:],
+        "daily_pnl": daily_pnl,
+        "positions": positions,
+        "log_tail": log_tail,
+        "stats": stats,
+        "generated_at": datetime.now(TZ).strftime("%Y-%m-%d %H:%M %Z"),
+    }
+
+    data_json = json.dumps(data, ensure_ascii=False)
+    html = HTML_TEMPLATE.replace("DATA_JSON_PLACEHOLDER", data_json)
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+    out_path = f"{OUT_DIR}/index.html"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    print(f"Dashboard written to {out_path} ({len(html):,} bytes)")
+    print(f"  Trades: {len(trades)}  |  Daily rows: {len(daily_pnl)}  |  Open positions: {len(positions)}")
+
+
+if __name__ == "__main__":
+    main()
