@@ -34,7 +34,7 @@ from config import (
 from bot.portfolio import Portfolio
 from bot.risk_manager import RiskManager
 from bot.strategies import mean_reversion, momentum_breakout, trend_following
-from bot import briefing, telegram
+from bot import briefing, database, telegram
 
 import os
 os.makedirs("logs", exist_ok=True)
@@ -381,6 +381,12 @@ def _process_trend_following(
 
 def run():
     logger.info("Starting trading bot")
+
+    # Forward WARNING+ logs to Supabase so the dashboard shows live activity
+    _db_handler = database.SupabaseLogHandler(level=logging.WARNING)
+    _db_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+    logging.getLogger().addHandler(_db_handler)
+
     api = _build_api()
     portfolio = Portfolio(api)
     risk = RiskManager(api)
@@ -400,6 +406,9 @@ def run():
     # Periodic Gist push: push logs every 30 min so the dashboard stays fresh mid-run
     _last_gist_push: float = 0.0
     _GIST_PUSH_INTERVAL = 1800  # seconds
+    # Heartbeat to Supabase every 5 min so dashboard shows bot is alive
+    _last_heartbeat: float = 0.0
+    _HEARTBEAT_INTERVAL = 300  # seconds
 
     def _already_briefed_today() -> bool:
         try:
@@ -493,6 +502,17 @@ def run():
 
         # Persist trailing-stop movements and any other mid-loop state changes
         portfolio.save_state()
+
+        # Heartbeat to Supabase every 5 min — lets the dashboard show the bot is alive
+        if time.time() - _last_heartbeat >= _HEARTBEAT_INTERVAL:
+            open_syms = list(portfolio.open_positions.keys())
+            database.insert_event(
+                "INFO",
+                f"Heartbeat — equity ${cached_equity:,.2f} | "
+                f"positions: {open_syms if open_syms else 'none'} | "
+                f"market {'open' if equity_market_open else 'closed'}",
+            )
+            _last_heartbeat = time.time()
 
         # Push logs to Gist every 30 min so the dashboard reflects current state mid-run
         if os.environ.get("GH_GIST_TOKEN") and time.time() - _last_gist_push >= _GIST_PUSH_INTERVAL:

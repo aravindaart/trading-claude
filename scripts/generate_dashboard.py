@@ -165,6 +165,15 @@ HTML_TEMPLATE = """\
     </div>
   </div>
 
+  <!-- Live Activity Feed -->
+  <div class="bg-gray-800 rounded-xl p-4">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Live Activity <span class="live-badge">30s REFRESH</span></h2>
+      <span id="activity-status" class="text-xs text-gray-500">connecting…</span>
+    </div>
+    <div id="activity-list" class="space-y-1 max-h-56 overflow-y-auto font-mono text-xs"></div>
+  </div>
+
   <!-- Open Positions -->
   <div class="bg-gray-800 rounded-xl p-4">
     <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">
@@ -442,6 +451,55 @@ async function refreshPrices() {
   $('price-at').textContent = anyLive ? now : 'unavailable';
 }
 
+// ── Live Activity feed ────────────────────────────────────────────────────────
+const LEVEL_STYLE = {
+  TRADE:   'text-green-400',
+  INFO:    'text-gray-300',
+  WARNING: 'text-yellow-400',
+  ERROR:   'text-red-400',
+  CRITICAL:'text-red-500',
+};
+
+async function refreshActivity() {
+  if (!SUPABASE_URL || SUPABASE_URL === 'SUPABASE_URL_PLACEHOLDER') {
+    $('activity-status').textContent = 'no Supabase';
+    $('activity-list').innerHTML = '<p class="text-xs text-gray-600">Configure SUPABASE_ANON_KEY to see live activity.</p>';
+    return;
+  }
+  const h = { apikey: SUPABASE_ANON, Authorization: `Bearer ${SUPABASE_ANON}` };
+  try {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/bot_events?order=ts.desc&limit=50&select=*`,
+      { headers: h, signal: AbortSignal.timeout(8000) }
+    );
+    if (!r.ok) { $('activity-status').textContent = 'error'; return; }
+    const events = await r.json();
+    const list = $('activity-list');
+    if (!events.length) {
+      list.innerHTML = '<p class="text-xs text-gray-500">No events yet — bot hasn\'t written to DB yet.</p>';
+      $('activity-status').textContent = 'waiting…';
+      return;
+    }
+    list.innerHTML = events.map(e => {
+      const ts = e.ts ? e.ts.slice(0, 19).replace('T', ' ') : '';
+      const cls = LEVEL_STYLE[e.level] || 'text-gray-400';
+      const badge = e.level === 'TRADE'
+        ? '<span class="text-xs bg-green-900 text-green-300 rounded px-1 mr-1">TRADE</span>'
+        : e.level === 'WARNING'
+        ? '<span class="text-xs bg-yellow-900 text-yellow-300 rounded px-1 mr-1">WARN</span>'
+        : e.level === 'ERROR' || e.level === 'CRITICAL'
+        ? '<span class="text-xs bg-red-900 text-red-300 rounded px-1 mr-1">ERR</span>'
+        : '';
+      return `<div class="py-1 border-b border-gray-700 leading-snug">
+        <span class="text-gray-600 mr-2">${ts}</span>${badge}<span class="${cls}">${e.message}</span>
+      </div>`;
+    }).join('');
+    $('activity-status').textContent = 'updated ' + new Date().toLocaleTimeString();
+  } catch {
+    $('activity-status').textContent = 'fetch error';
+  }
+}
+
 // ── Supabase live data ────────────────────────────────────────────────────────
 async function fetchSupabaseData() {
   if (!SUPABASE_URL || SUPABASE_URL === 'SUPABASE_URL_PLACEHOLDER') return null;
@@ -483,6 +541,10 @@ renderDashboard(window.__DATA__);
   // Market-price refresh every 60 s
   refreshPrices();
   setInterval(refreshPrices, 60_000);
+
+  // Activity feed — load immediately then every 30 s
+  refreshActivity();
+  setInterval(refreshActivity, 30_000);
 
   // Supabase data refresh every 5 min (keeps open sessions current without page reload)
   if (SUPABASE_URL && SUPABASE_URL !== 'SUPABASE_URL_PLACEHOLDER') {
