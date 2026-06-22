@@ -10,6 +10,7 @@ Responsibilities:
 - Log daily P&L at end of each trading day
 """
 import logging
+import subprocess
 import sys
 import time
 from datetime import date, datetime, timedelta
@@ -391,6 +392,9 @@ def run():
     _entry_blocked_until: dict[str, datetime] = {}
     # Signal confirmation: symbol → last seen signal dict (for 1-bar confirmation)
     _pending_signals: dict[str, dict] = {}
+    # Periodic Gist push: push logs every 30 min so the dashboard stays fresh mid-run
+    _last_gist_push: float = 0.0
+    _GIST_PUSH_INTERVAL = 1800  # seconds
 
     def _already_briefed_today() -> bool:
         try:
@@ -484,6 +488,18 @@ def run():
 
         # Persist trailing-stop movements and any other mid-loop state changes
         portfolio.save_state()
+
+        # Push logs to Gist every 30 min so the dashboard reflects current state mid-run
+        if os.environ.get("GH_GIST_TOKEN") and time.time() - _last_gist_push >= _GIST_PUSH_INTERVAL:
+            try:
+                subprocess.run(
+                    [sys.executable, "scripts/push_logs_to_gist.py"],
+                    check=False, timeout=60,
+                )
+                _last_gist_push = time.time()
+                logger.info("Periodic Gist push completed")
+            except Exception as exc:
+                logger.warning("Periodic Gist push failed: %s", exc)
 
         logger.debug("Sleeping %ds", POLL_INTERVAL_SECONDS)
         time.sleep(POLL_INTERVAL_SECONDS)
