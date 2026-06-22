@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import alpaca_trade_api as tradeapi
 
 from config import DAILY_PNL_CSV, INSTRUMENTS, LOG_DIR, TIMEZONE, TRADES_CSV
-from bot import telegram
+from bot import database, telegram
 
 logger = logging.getLogger(__name__)
 TZ = ZoneInfo(TIMEZONE)
@@ -173,7 +173,7 @@ class Portfolio:
         else:
             pnl = (pos["entry_price"] - fill_price) * pos["qty"]
 
-        _append_csv(TRADES_CSV, TRADES_HEADERS, {
+        trade_row = {
             "timestamp": datetime.now(TZ).isoformat(),
             "instrument": symbol,
             "direction": pos["direction"],
@@ -181,7 +181,9 @@ class Portfolio:
             "exit_price": round(fill_price, 6),
             "pnl": round(pnl, 2),
             "position_size": pos["qty"],
-        })
+        }
+        _append_csv(TRADES_CSV, TRADES_HEADERS, trade_row)
+        database.insert_trade(trade_row)
         logger.info("Closed %s direction=%s pnl=%.2f", symbol, pos["direction"], pnl)
 
         emoji = "✅" if pnl >= 0 else "❌"
@@ -212,13 +214,15 @@ class Portfolio:
         pnl = equity - self._day_start_equity
         pnl_pct = pnl / self._day_start_equity * 100
 
-        _append_csv(DAILY_PNL_CSV, DAILY_PNL_HEADERS, {
+        pnl_row = {
             "date": date.today().isoformat(),
             "starting_equity": round(self._day_start_equity, 2),
             "ending_equity": round(equity, 2),
             "pnl": round(pnl, 2),
             "pnl_pct": round(pnl_pct, 4),
-        })
+        }
+        _append_csv(DAILY_PNL_CSV, DAILY_PNL_HEADERS, pnl_row)
+        database.upsert_daily_pnl(pnl_row)
         logger.info("Daily P&L: %.2f (%.2f%%)", pnl, pnl_pct)
         self._day_start_equity = None
 
@@ -280,6 +284,7 @@ class Portfolio:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             json.dump(self.open_positions, f, indent=2)
+        database.upsert_positions(self.open_positions)
 
     def load_state(self, path: str = "logs/positions.json"):
         """Populate open_positions from JSON. Call before sync_with_broker() so broker reconciliation can prune stale entries."""

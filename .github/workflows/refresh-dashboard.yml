@@ -27,6 +27,9 @@ jobs:
         run: python scripts/pull_logs_from_gist.py
 
       - name: Generate dashboard
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: python scripts/generate_dashboard.py
 
       - name: Commit and push dashboard
